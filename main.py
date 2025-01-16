@@ -449,25 +449,57 @@ def create_return():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/orders/exchange', methods=['POST'])
-@token_required
-def create_exchange(current_user):
+def create_exchange():
     data = request.get_json()
     
     try:
-        # Get products
-        old_product = Product.query.get(data.get('product_id'))
-        new_product = Product.query.get(data.get('new_product_id'))
-        if not old_product or not new_product:
-            return jsonify({'error': 'Product not found'}), 404
+        # Validate required fields
+        required_fields = ['original_product_name', 'new_product_name', 
+                         'customer_email', 'customer_name', 'reason']
+        missing_fields = [field for field in required_fields if not data.get(field)]
+        if missing_fields:
+            return jsonify({
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+
+        # Get original product
+        original_product = Product.query.filter(
+            Product.name.ilike(data.get('original_product_name'))
+        ).first()
+        if not original_product:
+            return jsonify({'error': 'Original product not found'}), 404
+
+        # Get new product
+        new_product = Product.query.filter(
+            Product.name.ilike(data.get('new_product_name'))
+        ).first()
+        if not new_product:
+            return jsonify({'error': 'New product not found'}), 404
+
+        # Verify original purchase exists
+        purchase = Purchase.query.filter(
+            Purchase.product_id == original_product.id,
+            Purchase.customer_email == data.get('customer_email'),
+            Purchase.status == 'completed'
+        ).first()
+
+        if not purchase:
+            return jsonify({
+                'error': 'No completed purchase found for this product with the provided email'
+            }), 404
 
         # Create exchange order
         exchange = OrderFactory.create_order(
             order_type="exchange",
-            user_id=current_user.id,
-            product_id=old_product.id,
+            user_id=purchase.user_id,
+            product_id=original_product.id,
             new_product_id=new_product.id,
             reason=data.get('reason'),
-            status='pending_approval'  # Needs admin approval
+            status='pending_approval',
+            customer_email=data.get('customer_email'),
+            customer_name=data.get('customer_name'),
+            purchase_date=purchase.date,
+            original_purchase_id=purchase.id
         )
         
         db.session.add(exchange)
@@ -475,8 +507,18 @@ def create_exchange(current_user):
 
         return jsonify({
             'message': 'Exchange request created successfully, waiting for admin approval',
-            'order_id': exchange.id,
-            'status': 'pending_approval'
+            'exchange_id': exchange.id,
+            'exchange_reference': f'EXC-{exchange.id}',
+            'status': 'pending_approval',
+            'details': {
+                'original_product': original_product.name,
+                'new_product': new_product.name,
+                'customer_name': data.get('customer_name'),
+                'customer_email': data.get('customer_email'),
+                'reason': data.get('reason'),
+                'purchase_date': purchase.date.strftime('%Y-%m-%d %H:%M:%S'),
+                'original_purchase_reference': f'PUR-{purchase.id}'
+            }
         }), 201
 
     except Exception as e:
@@ -548,7 +590,6 @@ def approve_order(current_user, order_id):
 @admin_required
 def approve_return(current_user, return_id):
     try:
-        # Specifically query for Return model
         return_order = Return.query.get(return_id)
         if not return_order:
             return jsonify({'error': 'Return order not found'}), 404
@@ -560,6 +601,11 @@ def approve_return(current_user, return_id):
         approved = data.get('approved', True)
         admin_notes = data.get('admin_notes', '')
 
+        # Get the product
+        product = Product.query.get(return_order.product_id)
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
+
         if approved:
             # Approve return
             return_order.status = 'approved'
@@ -567,9 +613,8 @@ def approve_return(current_user, return_id):
             return_order.approved_by = current_user.id
             return_order.approved_at = datetime.utcnow()
 
-            # Update stock for physical products
-            product = Product.query.get(return_order.product_id)
-            if isinstance(product, PhysicalProduct):
+            # Update stock only if it's a physical product
+            if hasattr(product, 'stock'):
                 product.stock += 1
                 db.session.add(product)
 
@@ -582,6 +627,7 @@ def approve_return(current_user, return_id):
                 'status': 'approved',
                 'details': {
                     'product_name': product.name,
+                    'product_type': product.type,
                     'customer_name': return_order.customer_name,
                     'customer_email': return_order.customer_email,
                     'refund_amount': return_order.refund_amount,
@@ -606,8 +652,92 @@ def approve_return(current_user, return_id):
                 'status': 'rejected',
                 'details': {
                     'product_name': product.name,
+                    'product_type': product.type,
                     'admin_notes': admin_notes,
                     'rejected_at': return_order.rejected_at.strftime('%Y-%m-%d %H:%M:%S'),
+                    'rejected_by': current_user.email
+                }
+            }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# Admin approval route for exchanges
+@app.route('/orders/exchange/<int:exchange_id>/approve', methods=['POST'])
+@admin_required
+def approve_exchange(current_user, exchange_id):
+    try:
+        exchange = Exchange.query.get(exchange_id)
+        if not exchange:
+            return jsonify({'error': 'Exchange order not found'}), 404
+
+        if exchange.status != 'pending_approval':
+            return jsonify({'error': 'Exchange is not pending approval'}), 400
+
+        data = request.get_json()
+        approved = data.get('approved', True)
+        admin_notes = data.get('admin_notes', '')
+
+        # Get both products
+        original_product = Product.query.get(exchange.product_id)
+        new_product = Product.query.get(exchange.new_product_id)
+        
+        if not original_product or not new_product:
+            return jsonify({'error': 'Products not found'}), 404
+
+        if approved:
+            # Approve exchange
+            exchange.status = 'approved'
+            exchange.admin_notes = admin_notes
+            exchange.approved_by = current_user.id
+            exchange.approved_at = datetime.utcnow()
+
+            # Update stock for physical products
+            if hasattr(original_product, 'stock'):
+                original_product.stock += 1
+                db.session.add(original_product)
+            
+            if hasattr(new_product, 'stock'):
+                new_product.stock -= 1
+                db.session.add(new_product)
+
+            db.session.add(exchange)
+            db.session.commit()
+
+            return jsonify({
+                'message': 'Exchange approved successfully',
+                'exchange_reference': f'EXC-{exchange.id}',
+                'status': 'approved',
+                'details': {
+                    'original_product': original_product.name,
+                    'new_product': new_product.name,
+                    'customer_name': exchange.customer_name,
+                    'customer_email': exchange.customer_email,
+                    'admin_notes': admin_notes,
+                    'approved_at': exchange.approved_at.strftime('%Y-%m-%d %H:%M:%S'),
+                    'approved_by': current_user.email
+                }
+            }), 200
+        else:
+            # Reject exchange
+            exchange.status = 'rejected'
+            exchange.admin_notes = admin_notes
+            exchange.rejected_by = current_user.id
+            exchange.rejected_at = datetime.utcnow()
+            
+            db.session.add(exchange)
+            db.session.commit()
+
+            return jsonify({
+                'message': 'Exchange rejected',
+                'exchange_reference': f'EXC-{exchange.id}',
+                'status': 'rejected',
+                'details': {
+                    'original_product': original_product.name,
+                    'new_product': new_product.name,
+                    'admin_notes': admin_notes,
+                    'rejected_at': exchange.rejected_at.strftime('%Y-%m-%d %H:%M:%S'),
                     'rejected_by': current_user.email
                 }
             }), 200
