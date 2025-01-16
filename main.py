@@ -1,21 +1,20 @@
 from flask import Flask, request, jsonify
 from db import db, init_db
-from user.user import User
-from user.customer import Customer
-from user.admin import Administrator
-from user.factory import UserFactory
-from product.factory import ProductFactory
-from product.product import Product
+from user import User, UserFactory
+from product import Product, ProductFactory
+from orders import Order, OrderFactory, Purchase, Return, Exchange
 from functools import wraps
 import jwt
 from werkzeug.security import check_password_hash
 from datetime import datetime, timedelta
+from product.physical import PhysicalProduct
+from product.digital import DigitalProduct
 
 app = Flask(__name__)
 init_db(app)
 
 # JWT Configuration
-app.config['SECRET_KEY'] = 'your-secret-key'  # Move to .env in production
+app.config['SECRET_KEY'] = 'your-secret-key'  # Change this in production
 
 def token_required(f):
     @wraps(f)
@@ -283,7 +282,475 @@ def create_product(current_user):
         db.session.rollback()
         return jsonify({'error': str(e)}), 400
 
+# Simple product search by name
+@app.route('/products/search', methods=['GET'])
+def search_products():
+    try:
+        # Get search query
+        query = request.args.get('q', '')
+        if not query:
+            return jsonify({'error': 'Please provide a search term'}), 400
+        
+        # Search products by name (case-insensitive)
+        products = Product.query.filter(
+            Product.name.ilike(f'%{query}%')
+        ).all()
+        
+        if not products:
+            return jsonify({
+                'message': 'No products found',
+                'products': []
+            }), 200
+            
+        return jsonify({
+            'message': f'Found {len(products)} products',
+            'products': [{
+                'name': product.name,
+                'description': product.description,
+                'price': product.price,
+                'type': product.type,
+                'details': product.get_details()
+            } for product in products]
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Purchase route - using product name
+@app.route('/orders/purchase', methods=['POST'])
+def create_purchase():
+    data = request.get_json()
+    
+    try:
+        # Validate required fields
+        required_fields = ['product_name', 'customer_email', 'customer_name']
+        missing_fields = [field for field in required_fields if not data.get(field)]
+        if missing_fields:
+            return jsonify({
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+
+        # Get product by name
+        product_name = data.get('product_name')
+        product = Product.query.filter(Product.name.ilike(product_name)).first()
+        if not product:
+            # Try to find similar products
+            similar_products = Product.query.filter(
+                Product.name.ilike(f'%{product_name}%')
+            ).all()
+            if similar_products:
+                return jsonify({
+                    'error': 'Product not found',
+                    'suggestions': [{
+                        'name': p.name,
+                        'price': p.price,
+                        'type': p.type
+                    } for p in similar_products]
+                }), 404
+            return jsonify({'error': 'Product not found'}), 404
+
+        # Create purchase order with customer details
+        purchase = OrderFactory.create_order(
+            order_type="purchase",
+            user_id=data.get('user_id', None),
+            product_id=product.id,
+            quantity=data.get('quantity', 1),
+            status='pending',
+            customer_email=data.get('customer_email'),
+            customer_name=data.get('customer_name')
+        )
+
+        # Process the purchase
+        result = purchase.process(product)
+        
+        if result['status'] == 'success':
+            return jsonify(result), 201
+        elif result['status'] == 'failed':
+            return jsonify(result), 400
+        else:
+            return jsonify(result), 500
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/orders/return', methods=['POST'])
+def create_return():
+    data = request.get_json()
+    
+    try:
+        # Validate required fields
+        required_fields = ['product_name', 'customer_email', 'customer_name', 
+                         'purchase_date', 'reason', 'refund_amount']
+        missing_fields = [field for field in required_fields if not data.get(field)]
+        if missing_fields:
+            return jsonify({
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+
+        # Get product by name
+        product_name = data.get('product_name')
+        product = Product.query.filter(Product.name.ilike(product_name)).first()
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
+
+        # Verify purchase exists
+        purchase = Purchase.query.filter(
+            Purchase.product_id == product.id,
+            Purchase.customer_email == data.get('customer_email'),
+            Purchase.status == 'completed'
+        ).first()
+
+        if not purchase:
+            return jsonify({
+                'error': 'No completed purchase found for this product with the provided email'
+            }), 404
+
+        # Verify return amount doesn't exceed purchase price
+        if float(data.get('refund_amount')) > purchase.total_price:
+            return jsonify({
+                'error': f'Refund amount cannot exceed original purchase price of {purchase.total_price}'
+            }), 400
+
+        # Create return order
+        return_order = OrderFactory.create_order(
+            order_type="return",
+            user_id=purchase.user_id,
+            product_id=product.id,
+            reason=data.get('reason'),
+            refund_amount=data.get('refund_amount'),
+            status='pending_approval',
+            customer_email=data.get('customer_email'),
+            customer_name=data.get('customer_name'),
+            purchase_date=purchase.date,
+            original_purchase_id=purchase.id
+        )
+        
+        db.session.add(return_order)
+        db.session.commit()
+
+        return jsonify({
+            'message': 'Return request created successfully, waiting for admin approval',
+            'return_id': return_order.id,
+            'return_reference': f'RET-{return_order.id}',
+            'status': 'pending_approval',
+            'details': {
+                'product_name': product.name,
+                'customer_name': data.get('customer_name'),
+                'customer_email': data.get('customer_email'),
+                'reason': data.get('reason'),
+                'refund_amount': data.get('refund_amount'),
+                'purchase_date': purchase.date.strftime('%Y-%m-%d %H:%M:%S'),
+                'original_purchase_reference': f'PUR-{purchase.id}'
+            }
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/orders/exchange', methods=['POST'])
+@token_required
+def create_exchange(current_user):
+    data = request.get_json()
+    
+    try:
+        # Get products
+        old_product = Product.query.get(data.get('product_id'))
+        new_product = Product.query.get(data.get('new_product_id'))
+        if not old_product or not new_product:
+            return jsonify({'error': 'Product not found'}), 404
+
+        # Create exchange order
+        exchange = OrderFactory.create_order(
+            order_type="exchange",
+            user_id=current_user.id,
+            product_id=old_product.id,
+            new_product_id=new_product.id,
+            reason=data.get('reason'),
+            status='pending_approval'  # Needs admin approval
+        )
+        
+        db.session.add(exchange)
+        db.session.commit()
+
+        return jsonify({
+            'message': 'Exchange request created successfully, waiting for admin approval',
+            'order_id': exchange.id,
+            'status': 'pending_approval'
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# Admin approval routes
+@app.route('/orders/<int:order_id>/approve', methods=['POST'])
+@admin_required
+def approve_order(current_user, order_id):
+    try:
+        order = Order.query.get(order_id)
+        if not order:
+            return jsonify({'error': 'Order not found'}), 404
+
+        if order.type not in ['return', 'exchange']:
+            return jsonify({'error': 'Only return and exchange orders need approval'}), 400
+
+        if order.status != 'pending_approval':
+            return jsonify({'error': 'Order is not pending approval'}), 400
+
+        # Process the approval based on order type
+        if order.type == 'return':
+            # Update stock for physical products
+            product = Product.query.get(order.product_id)
+            if isinstance(product, PhysicalProduct):
+                product.stock += 1
+                db.session.add(product)
+            
+            order.status = 'approved'
+            order.approved_by = current_user.id
+            order.approved_at = datetime.utcnow()
+            
+        elif order.type == 'exchange':
+            # Handle stock updates for exchange
+            old_product = Product.query.get(order.product_id)
+            new_product = Product.query.get(order.new_product_id)
+            
+            if isinstance(old_product, PhysicalProduct):
+                old_product.stock += 1
+                db.session.add(old_product)
+            
+            if isinstance(new_product, PhysicalProduct):
+                if new_product.stock > 0:
+                    new_product.stock -= 1
+                    db.session.add(new_product)
+                else:
+                    return jsonify({'error': 'New product out of stock'}), 400
+            
+            order.status = 'approved'
+            order.approved_by = current_user.id
+            order.approved_at = datetime.utcnow()
+
+        db.session.add(order)
+        db.session.commit()
+
+        return jsonify({
+            'message': f'{order.type.capitalize()} order approved successfully',
+            'order_id': order.id,
+            'status': 'approved'
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# Admin approval route for returns
+@app.route('/orders/return/<int:return_id>/approve', methods=['POST'])
+@admin_required
+def approve_return(current_user, return_id):
+    try:
+        # Specifically query for Return model
+        return_order = Return.query.get(return_id)
+        if not return_order:
+            return jsonify({'error': 'Return order not found'}), 404
+
+        if return_order.status != 'pending_approval':
+            return jsonify({'error': 'Return is not pending approval'}), 400
+
+        data = request.get_json()
+        approved = data.get('approved', True)
+        admin_notes = data.get('admin_notes', '')
+
+        if approved:
+            # Approve return
+            return_order.status = 'approved'
+            return_order.admin_notes = admin_notes
+            return_order.approved_by = current_user.id
+            return_order.approved_at = datetime.utcnow()
+
+            # Update stock for physical products
+            product = Product.query.get(return_order.product_id)
+            if isinstance(product, PhysicalProduct):
+                product.stock += 1
+                db.session.add(product)
+
+            db.session.add(return_order)
+            db.session.commit()
+
+            return jsonify({
+                'message': 'Return approved successfully',
+                'return_reference': f'RET-{return_order.id}',
+                'status': 'approved',
+                'details': {
+                    'product_name': product.name,
+                    'customer_name': return_order.customer_name,
+                    'customer_email': return_order.customer_email,
+                    'refund_amount': return_order.refund_amount,
+                    'admin_notes': admin_notes,
+                    'approved_at': return_order.approved_at.strftime('%Y-%m-%d %H:%M:%S'),
+                    'approved_by': current_user.email
+                }
+            }), 200
+        else:
+            # Reject return
+            return_order.status = 'rejected'
+            return_order.admin_notes = admin_notes
+            return_order.rejected_by = current_user.id
+            return_order.rejected_at = datetime.utcnow()
+            
+            db.session.add(return_order)
+            db.session.commit()
+
+            return jsonify({
+                'message': 'Return rejected',
+                'return_reference': f'RET-{return_order.id}',
+                'status': 'rejected',
+                'details': {
+                    'product_name': product.name,
+                    'admin_notes': admin_notes,
+                    'rejected_at': return_order.rejected_at.strftime('%Y-%m-%d %H:%M:%S'),
+                    'rejected_by': current_user.email
+                }
+            }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# View orders
+@app.route('/orders', methods=['GET'])
+@token_required
+def get_orders(current_user):
+    try:
+        # Regular users can only see their orders
+        # Admins can see all orders
+        if current_user.type == 'administrator':
+            orders = Order.query.all()
+        else:
+            orders = Order.query.filter_by(user_id=current_user.id).all()
+
+        return jsonify({
+            'orders': [{
+                'id': order.id,
+                'type': order.type,
+                'status': order.status,
+                'date': order.date,
+                'details': order.get_details()
+            } for order in orders]
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# GET - Get all products (no authentication required)
+@app.route('/products', methods=['GET'])
+def get_products():
+    try:
+        products = Product.query.all()
+        return jsonify({
+            'products': [{
+                'id': product.id,
+                'name': product.name,
+                'description': product.description,
+                'price': product.price,
+                'type': product.type,
+                'details': product.get_details()
+            } for product in products]
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# GET - Get specific product by ID (no authentication required)
+@app.route('/products/<int:product_id>', methods=['GET'])
+def get_product(product_id):
+    try:
+        product = Product.query.get(product_id)
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
+            
+        return jsonify({
+            'id': product.id,
+            'name': product.name,
+            'description': product.description,
+            'price': product.price,
+            'type': product.type,
+            'details': product.get_details()
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# UPDATE - Update product (admin only)
+@app.route('/products/<int:product_id>', methods=['PUT'])
+@admin_required
+def update_product(current_user, product_id):
+    try:
+        product = Product.query.get(product_id)
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
+
+        data = request.get_json()
+        
+        # Update basic attributes
+        if 'name' in data:
+            product.name = data['name']
+        if 'description' in data:
+            product.description = data['description']
+        if 'price' in data:
+            product.price = data['price']
+            
+        # Update type-specific attributes
+        if product.type == 'physical':
+            if 'weight' in data:
+                product.weight = data['weight']
+            if 'stock' in data:
+                product.stock = data['stock']
+        elif product.type == 'digital':
+            if 'file_size' in data:
+                product.file_size = data['file_size']
+            if 'download_link' in data:
+                product.download_link = data['download_link']
+                
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Product updated successfully',
+            'product': {
+                'id': product.id,
+                'name': product.name,
+                'description': product.description,
+                'price': product.price,
+                'type': product.type,
+                'details': product.get_details()
+            }
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# DELETE - Delete product (admin only)
+@app.route('/products/<int:product_id>', methods=['DELETE'])
+@admin_required
+def delete_product(current_user, product_id):
+    try:
+        product = Product.query.get(product_id)
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
+            
+        db.session.delete(product)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Product deleted successfully',
+            'product_id': product_id
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     with app.app_context():
+        print("Dropping all tables...")
+        db.drop_all()
+        print("Creating all tables...")
         db.create_all()
+        print("Database tables created successfully!")
     app.run(debug=True)
