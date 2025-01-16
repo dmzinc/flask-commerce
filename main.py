@@ -1,17 +1,29 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 from db import db, init_db
 from user import User, UserFactory
 from product import Product, ProductFactory
 from orders import Order, OrderFactory, Purchase, Return, Exchange
+from orders.cart import Cart
 from functools import wraps
 import jwt
 from werkzeug.security import check_password_hash
 from datetime import datetime, timedelta
 from product.physical import PhysicalProduct
 from product.digital import DigitalProduct
+from sqlalchemy import text
+import uuid
 
 app = Flask(__name__)
+app.secret_key = 'your-secret-key'  # Add this line for session support
 init_db(app)
+
+# Initialize cart in session if it doesn't exist
+@app.before_request
+def before_request():
+    if 'cart' not in session:
+        session['cart'] = []
+    if 'session_id' not in session:
+        session['session_id'] = str(uuid.uuid4())
 
 # JWT Configuration
 app.config['SECRET_KEY'] = 'your-secret-key'  # Change this in production
@@ -313,63 +325,6 @@ def search_products():
             } for product in products]
         }), 200
         
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# Purchase route - using product name
-@app.route('/orders/purchase', methods=['POST'])
-def create_purchase():
-    data = request.get_json()
-    
-    try:
-        # Validate required fields
-        required_fields = ['product_name', 'customer_email', 'customer_name']
-        missing_fields = [field for field in required_fields if not data.get(field)]
-        if missing_fields:
-            return jsonify({
-                'error': f'Missing required fields: {", ".join(missing_fields)}'
-            }), 400
-
-        # Get product by name
-        product_name = data.get('product_name')
-        product = Product.query.filter(Product.name.ilike(product_name)).first()
-        if not product:
-            # Try to find similar products
-            similar_products = Product.query.filter(
-                Product.name.ilike(f'%{product_name}%')
-            ).all()
-            if similar_products:
-                return jsonify({
-                    'error': 'Product not found',
-                    'suggestions': [{
-                        'name': p.name,
-                        'price': p.price,
-                        'type': p.type
-                    } for p in similar_products]
-                }), 404
-            return jsonify({'error': 'Product not found'}), 404
-
-        # Create purchase order with customer details
-        purchase = OrderFactory.create_order(
-            order_type="purchase",
-            user_id=data.get('user_id', None),
-            product_id=product.id,
-            quantity=data.get('quantity', 1),
-            status='pending',
-            customer_email=data.get('customer_email'),
-            customer_name=data.get('customer_name')
-        )
-
-        # Process the purchase
-        result = purchase.process(product)
-        
-        if result['status'] == 'success':
-            return jsonify(result), 201
-        elif result['status'] == 'failed':
-            return jsonify(result), 400
-        else:
-            return jsonify(result), 500
-
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -876,10 +831,99 @@ def delete_product(current_user, product_id):
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+# Add to cart (requires authentication)
+@app.route('/cart/add', methods=['POST'])
+@token_required
+def add_to_cart(current_user):
+    try:
+        data = request.get_json()
+        product_id = data.get('product_id')
+        quantity = data.get('quantity', 1)
+
+        cart_item, message = Cart.add_to_cart(
+            product_id=product_id,
+            quantity=quantity,
+            user_id=current_user.id
+        )
+
+        if not cart_item:
+            return jsonify({'error': message}), 400
+
+        return jsonify({
+            'message': message,
+            'cart_item': cart_item.to_dict()
+        }), 201
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Get cart contents (requires authentication)
+@app.route('/cart', methods=['GET'])
+@token_required
+def get_cart(current_user):
+    try:
+        cart_items = Cart.get_user_cart(current_user.id)
+        
+        return jsonify({
+            'items': [item.to_dict() for item in cart_items],
+            'total': sum(item.total_price for item in cart_items)
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Clear cart (requires authentication)
+@app.route('/cart/clear', methods=['DELETE'])
+@token_required
+def clear_cart(current_user):
+    try:
+        success, message = Cart.clear_cart(current_user.id)
+        
+        if not success:
+            return jsonify({'error': message}), 400
+
+        return jsonify({'message': message}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/reset-db', methods=['POST'])
+def reset_database():
+    try:
+        with db.engine.connect() as connection:
+            # Drop tables in correct order
+            connection.execute(text("DROP TABLE IF EXISTS cart_items CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS returns CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS exchanges CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS purchases CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS physical_products CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS digital_products CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS products CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS administrators CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS users CASCADE;"))
+            connection.commit()
+
+        # Recreate all tables
+        db.create_all()
+        
+        return jsonify({'message': 'Database reset successfully'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     with app.app_context():
         print("Dropping all tables...")
-        db.drop_all()
+        with db.engine.connect() as connection:
+            connection.execute(text("DROP TABLE IF EXISTS cart_items CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS returns CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS purchases CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS administrators CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS users CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS products CASCADE;"))
+            connection.commit()
+        
         print("Creating all tables...")
         db.create_all()
         print("Database tables created successfully!")

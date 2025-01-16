@@ -16,6 +16,8 @@ class Order(db.Model):
     date = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     status = db.Column(db.String(50))
     type = db.Column(db.String(50))
+    quantity = db.Column(db.Integer, default=1)
+    total_price = db.Column(db.Float)
 
     __mapper_args__ = {
         'polymorphic_identity': 'order',
@@ -26,5 +28,19 @@ class Order(db.Model):
     def process(self):
         pass
 
-    def __repr__(self):
-        return f'<Order {self.id}>' 
+    def get_details(self):
+        base_details = {
+            'order_id': self.id,
+            'product_id': self.product_id,
+            'date': self.date.strftime('%Y-%m-%d %H:%M:%S'),
+            'status': self.status,
+            'type': self.type,
+            'quantity': self.quantity,
+            'total_price': self.total_price
+        }
+        
+        if hasattr(self, 'process'):
+            additional_details = self.process()['details']
+            base_details.update(additional_details)
+        
+        return base_details 
