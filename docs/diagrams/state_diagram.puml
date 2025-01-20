@@ -1,0 +1,10 @@
+
+@startuml order_state_diagram
+[*] --> Cart: Add to Cart
+Cart --> Completed: Complete Purchase
+Completed --> PendingApproval: Request Return/Exchange
+PendingApproval --> Approved: Admin Approves
+PendingApproval --> Rejected: Admin Rejects
+Approved --> [*]
+Rejected --> [*]
+@enduml

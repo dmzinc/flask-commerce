@@ -12,21 +12,24 @@ from product.physical import PhysicalProduct
 from product.digital import DigitalProduct
 from sqlalchemy import text
 import uuid
+import os
+from dotenv import load_dotenv
+from utils.logger import (
+    log_user_operation,
+    log_product_operation, 
+    log_cart_operation,
+    log_order_operation
+)
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key'  # Add this line for session support
+# Get secret key from environment variable
+app.config['SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
+
+# Initialize database
 init_db(app)
-
-# Initialize cart in session if it doesn't exist
-@app.before_request
-def before_request():
-    if 'cart' not in session:
-        session['cart'] = []
-    if 'session_id' not in session:
-        session['session_id'] = str(uuid.uuid4())
-
-# JWT Configuration
-app.config['SECRET_KEY'] = 'your-secret-key'  # Change this in production
 
 def token_required(f):
     @wraps(f)
@@ -36,7 +39,7 @@ def token_required(f):
             return jsonify({'error': 'Token is missing'}), 401
 
         try:
-            token = token.split(' ')[1]  # Remove 'Bearer ' prefix
+            token = token.split(' ')[1]
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
             current_user = User.query.get(data['user_id'])
         except:
@@ -64,40 +67,44 @@ def admin_required(f):
         return f(current_user, *args, **kwargs)
     return decorated
 
-@app.route('/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    user = User.query.filter_by(username=data.get('username')).first()
 
-    if user and user.verify_password(data.get('password')):
-        token = jwt.encode({
-            'user_id': user.id,
-            'exp': datetime.utcnow() + timedelta(hours=24)
-        }, app.config['SECRET_KEY'], algorithm='HS256')
-
-        return jsonify({
-            'token': token,
-            'user': {
-                'id': user.id,
-                'username': user.username,
-                'email': user.email,
-                'type': user.type
-            }
-        })
-
-    return jsonify({'error': 'Invalid username or password'}), 401
-
-# CREATE - Create single or multiple users
+#Create users
 @app.route('/users', methods=['POST'])
-def create_user():
-    data = request.get_json()
-    if isinstance(data, dict):
-        data = [data]
-    
-    created_users = []
-    errors = []
+@log_user_operation('create_user')
+def create_users():
+    """
+    Create a new user account.
 
+    Method: POST
+    URL: http://localhost:5000/users
+    Headers: 
+        Content-Type: application/json
+
+    Request Body:
+    {
+        "username": string,    # User's display name
+        "email": string,      # User's email address
+        "password": string,   # User's password
+        "user_type": string   # Either "customer" or "administrator"
+    }
+
+    Returns:
+    201: {
+        "message": "User created successfully",
+        "id": int,
+        "username": string,
+        "email": string,
+        "user_type": string
+    }
+    """
     try:
+        data = request.get_json()
+        if not isinstance(data, list):
+            data = [data]
+
+        created_users = []
+        errors = []
+
         for user_data in data:
             try:
                 existing_user = User.query.filter_by(
@@ -118,13 +125,15 @@ def create_user():
                 )
                 
                 db.session.add(new_user)
+                db.session.flush() 
+                
                 created_users.append({
                     'id': new_user.id,
                     'username': new_user.username,
                     'email': new_user.email,
                     'type': new_user.type
                 })
-                
+
             except Exception as e:
                 errors.append(f"Error creating user {user_data.get('username')}: {str(e)}")
         
@@ -139,15 +148,88 @@ def create_user():
             response['errors'] = errors
             
         return jsonify(response), 201 if created_users else 400
-    
+
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 400
 
-# READ - Get all users
+# LOGIN - Authenticate user and get JWT token
+@app.route('/login', methods=['POST'])
+@log_user_operation('user_login')
+def login():
+    """
+    Authenticate user and get JWT token.
+
+    Method: POST
+    URL: http://localhost:5000/login
+    Headers: 
+        Content-Type: application/json
+
+    Request Body:
+    {
+        "email": string,      # User's email
+        "password": string    # User's password
+    }
+
+    Returns:
+    200: {
+        "token": string,      # JWT token
+        "user": {
+            "id": int,
+            "username": string,
+            "email": string,
+            "user_type": string
+        }
+    }
+    """
+    data = request.get_json()
+    user = User.query.filter_by(username=data.get('username')).first()
+
+    if user and user.verify_password(data.get('password')):
+        token = jwt.encode(
+            payload={
+                'user_id': user.id,
+                'exp': datetime.utcnow() + timedelta(hours=24)
+            },
+            key=str(app.config['SECRET_KEY']),
+            algorithm='HS256'
+        )
+
+        return jsonify({
+            'token': token,
+            'user_id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'user_type': user.type
+        })
+    
+    return jsonify({'error': 'Invalid credentials'}), 401
+
+# Get all users
 @app.route('/users', methods=['GET'])
 @admin_required
 def get_all_users(current_user):
+    """
+    Get all users in the system. Requires administrator privileges.
+
+    Method: GET
+    URL: http://localhost:5000/users
+    Headers:
+        Authorization: Bearer <jwt_token>
+
+    Returns:
+    200: {
+        "users": [
+            {
+                "id": int,          # User ID
+                "username": string,  # User's display name
+                "email": string,     # User's email address
+                "type": string      # User type ("customer" or "administrator")
+            },
+            ...
+        ]
+    }
+    """
     users = User.query.all()
     return jsonify({
         'users': [
@@ -160,10 +242,37 @@ def get_all_users(current_user):
         ]
     })
 
-# READ - Get single user by ID
+#  Get user by ID
 @app.route('/users/<int:user_id>', methods=['GET'])
 @admin_required
 def get_user(user_id):
+    """
+    Get details for a specific user by their ID. Requires administrator privileges.
+
+    Method: GET
+    URL: http://localhost:5000/users/<int:user_id>
+    Headers:
+        Authorization: Bearer <jwt_token>
+
+    Parameters:
+        user_id (int): The ID of the user to retrieve
+
+    Returns:
+    200: {
+        "user": {
+            "id": int,          # User ID
+            "username": string,  # User's display name
+            "email": string,     # User's email address
+            "type": string      # User type ("customer" or "administrator")
+        }
+    }
+
+    Errors:
+    401: {"error": "Token is missing/invalid"}
+    403: {"error": "Admin privileges required"}
+    404: {"error": "User not found"}
+    500: {"error": "Internal server error"}
+    """
     user = User.query.get_or_404(user_id)
     return jsonify({
         'user': {
@@ -174,12 +283,51 @@ def get_user(user_id):
         }
     })
 
-# UPDATE - Update user
+#Update user
 @app.route('/users/<int:user_id>', methods=['PUT'])
-@admin_required
-def update_user(user_id):
+@token_required
+def update_user(current_user, user_id):
+    """
+    Update a user's information. Users can only update their own information unless they are administrators.
+
+    Method: PUT
+    URL: http://localhost:5000/users/<int:user_id>
+    Headers:
+        Authorization: Bearer <jwt_token>
+        Content-Type: application/json
+
+    Parameters:
+        user_id (int): The ID of the user to update
+
+    Request Body:
+    {
+        "username": string,     # Optional - New username
+        "email": string,        # Optional - New email address
+        "password": string,     # Optional - New password
+        "user_type": string     # Optional - New user type (admin only)
+    }
+
+    Returns:
+    200: {
+        "message": "User updated successfully",
+        "user": {
+            "id": int,          # User ID
+            "username": string,  # Updated username
+            "email": string,     # Updated email
+            "type": string      # User type
+        }
+    }
+    """
     user = User.query.get_or_404(user_id)
     data = request.get_json()
+
+    # Check authorization
+    if current_user.id != user_id and current_user.type != 'administrator':
+        return jsonify({'error': 'Unauthorized to update this user'}), 403
+
+    # If regular user trying to change user type, deny
+    if 'user_type' in data and current_user.type != 'administrator':
+        return jsonify({'error': 'Cannot change user type'}), 403
 
     try:
         if 'username' in data:
@@ -211,10 +359,29 @@ def update_user(user_id):
         db.session.rollback()
         return jsonify({'error': str(e)}), 400
 
-# DELETE - Delete user
+#Delete user
 @app.route('/users/<int:user_id>', methods=['DELETE'])
 @admin_required
 def delete_user(user_id):
+    """
+    Delete a user account. Admin only.
+
+    Method: DELETE
+    URL: http://localhost:5000/users/<user_id>
+    Headers:
+        Authorization: Bearer <token>
+
+    Returns:
+    200: {
+        "message": string      # Success message
+    }
+
+    Errors:
+    401: {"error": "Token is missing/invalid"}
+    403: {"error": "Admin privileges required"}
+    404: {"error": "User not found"}
+    400: {"error": string}     # Other errors
+    """
     user = User.query.get_or_404(user_id)
     try:
         db.session.delete(user)
@@ -226,10 +393,53 @@ def delete_user(user_id):
         db.session.rollback()
         return jsonify({'error': str(e)}), 400
 
-# CREATE - Create single or multiple products
+#Create products
 @app.route('/products', methods=['POST'])
 @admin_required
+@log_product_operation('create_product')
 def create_product(current_user):
+    """
+    Create one or more new products. Admin only.
+
+    Method: POST
+    URL: http://localhost:5000/products
+    Headers:
+        Authorization: Bearer <token>
+        Content-Type: application/json
+
+    Request Body:
+
+    {
+        "name": string,           # Product name
+        "description": string,    # Product description (optional)
+        "price": float,          # Product price
+        "product_type": string,  # Either "physical" or "digital"
+        
+        # For physical products:
+        "weight": float,         # Product weight (optional)
+        "stock": int,           # Initial stock quantity (optional, default 0)
+        
+        # For digital products:
+        "file_size": float,     # File size in MB (optional)
+        "download_link": string  # Download URL (optional)
+    }
+
+    Returns:
+    201: {                      
+        "id": int,
+        "name": string,
+        "description": string,
+        "price": float,
+        "type": string,
+        "details": object      
+    }
+    
+
+    Errors:
+    400: {"error": string}      # Validation/processing errors
+    401: {"error": "Token is missing/invalid"}
+    403: {"error": "Admin privileges required"}
+    """
     data = request.get_json()
     if isinstance(data, dict):
         data = [data]
@@ -240,14 +450,12 @@ def create_product(current_user):
     try:
         for product_data in data:
             try:
-                # Base product attributes
+                
                 base_attrs = {
                     'name': product_data['name'],
                     'description': product_data.get('description', ''),
                     'price': product_data['price']
                 }
-
-                # Add type-specific attributes
                 if product_data['product_type'] == 'physical':
                     base_attrs.update({
                         'weight': product_data.get('weight'),
@@ -258,52 +466,69 @@ def create_product(current_user):
                         'file_size': product_data.get('file_size'),
                         'download_link': product_data.get('download_link')
                     })
-
-                # Create product using factory
                 new_product = ProductFactory.create_product(
                     product_type=product_data['product_type'],
                     **base_attrs
                 )
                 
                 db.session.add(new_product)
-                created_products.append({
+                db.session.flush() 
+                
+                product_dict = {
                     'id': new_product.id,
                     'name': new_product.name,
                     'description': new_product.description,
                     'price': new_product.price,
                     'type': new_product.type,
                     'details': new_product.get_details()
-                })
+                }
+                created_products.append(product_dict)
                 
             except Exception as e:
                 errors.append(f"Error creating product {product_data.get('name')}: {str(e)}")
         
         if created_products:
             db.session.commit()
+            response_data = created_products[0] if len(created_products) == 1 else created_products
+            return jsonify(response_data), 201
         
-        response = {
-            'message': f'Created {len(created_products)} products',
-            'products': created_products
-        }
-        if errors:
-            response['errors'] = errors
-            
-        return jsonify(response), 201 if created_products else 400
+        return jsonify({'errors': errors}), 400
     
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 400
 
-# Simple product search by name
+# search product by name
 @app.route('/products/search', methods=['GET'])
 def search_products():
+    """
+    Search for products by name.
+
+    Method: GET
+    URL: http://localhost:5000/products/search
+    Query Parameters:
+        q: string - Search term to filter products by name
+    
+    Returns:
+    200: {
+        "message": string,
+        "products": [
+            {
+                "name": string,
+                "description": string, 
+                "price": float,
+                "type": string,
+                "details": object
+            }
+        ]
+    }
+    """
     try:
         # Get search query
         query = request.args.get('q', '')
         if not query:
             return jsonify({'error': 'Please provide a search term'}), 400
         
-        # Search products by name (case-insensitive)
         products = Product.query.filter(
             Product.name.ilike(f'%{query}%')
         ).all()
@@ -327,58 +552,288 @@ def search_products():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+ 
+#Get all products
+@app.route('/products', methods=['GET'])
+def get_products():
+    """
+    Get list of all products.
 
+    Method: GET
+    URL: http://localhost:5000/products
+    Headers: 
+        Content-Type: application/json
+
+    Returns:
+    200: {
+        "products": [
+            {
+                "id": int,
+                "name": string,
+                "description": string,
+                "price": float, 
+                "type": string,
+                "details": object
+            }
+        ]
+    }
+    """
+    try:
+        products = Product.query.all()
+        return jsonify({
+            'products': [{
+                'id': product.id,
+                'name': product.name,
+                'description': product.description,
+                'price': product.price,
+                'type': product.type,
+                'details': product.get_details()
+            } for product in products]
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+#Get product by ID
+@app.route('/products/<int:product_id>', methods=['GET'])
+def get_product(product_id):
+    """
+    Get product by ID.
+
+    Method: GET
+    URL: http://localhost:5000/products/<product_id>
+    Headers: 
+        Content-Type: application/json
+
+    Returns:
+    200: {
+        "id": int,
+        "name": string,
+        "description": string,
+        "price": float,
+        "type": string,
+        "details": object
+    }
+    """
+    try:
+        product = Product.query.get_or_404(product_id)
+        return jsonify({
+            'id': product.id,
+            'name': product.name,
+            'description': product.description,
+            'price': product.price,
+            'type': product.type,
+            'details': product.get_details()
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+#Update product
+@app.route('/products/<int:product_id>', methods=['PUT'])
+@admin_required
+def update_product(current_user, product_id):
+    """
+    Update an existing product. Admin only.
+
+    Method: PUT
+    URL: http://localhost:5000/products/<product_id>
+    Headers: 
+        Content-Type: application/json
+        Authorization: Bearer <token>
+
+    Request Body:
+    {
+        "name": string,           # Optional
+        "description": string,    # Optional 
+        "price": float,          # Optional
+        
+        # For physical products:
+        "weight": float,         # Optional
+        "stock": integer,        # Optional
+        
+        # For digital products:
+        "file_size": float,      # Optional
+        "download_link": string   # Optional
+    }
+
+    Returns:
+    200: {
+        "message": string,
+        "product": {
+            "id": integer,
+            "name": string,
+            "description": string,
+            "price": float,
+            "type": string,
+            "details": object
+        }
+    }
+    """
+    try:
+        product = Product.query.get(product_id)
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
+
+        data = request.get_json()
+
+        if 'name' in data:
+            product.name = data['name']
+        if 'description' in data:
+            product.description = data['description']
+        if 'price' in data:
+            product.price = data['price']
+            
+        
+        if product.type == 'physical':
+            if 'weight' in data:
+                product.weight = data['weight']
+            if 'stock' in data:
+                product.stock = data['stock']
+        elif product.type == 'digital':
+            if 'file_size' in data:
+                product.file_size = data['file_size']
+            if 'download_link' in data:
+                product.download_link = data['download_link']
+                
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Product updated successfully',
+            'product': {
+                'id': product.id,
+                'name': product.name,
+                'description': product.description,
+                'price': product.price,
+                'type': product.type,
+                'details': product.get_details()
+            }
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+#Delete product (admin only)
+@app.route('/products/<int:product_id>', methods=['DELETE'])
+@admin_required
+def delete_product(current_user, product_id):
+    """
+    Delete a product from the catalog. Admin only.
+
+    Method: DELETE
+    URL: http://localhost:5000/products/<product_id>
+    Headers:
+        Authorization: Bearer <token>
+
+    Parameters:
+        product_id (int): ID of the product to delete
+
+    Returns:
+    200: {
+        "message": string,      # Success message
+        "product_id": int       # ID of deleted product
+    }
+    """
+    try:
+        product = Product.query.get(product_id)
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
+            
+        db.session.delete(product)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Product deleted successfully',
+            'product_id': product_id
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+#Create return order
 @app.route('/orders/return', methods=['POST'])
-def create_return():
+@token_required
+@log_order_operation('create_return')
+def create_return(current_user):
+    """
+    Create a new return order for a completed purchase.
+
+    Method: POST
+    URL: http://localhost:5000/orders/return
+    Headers:
+        Content-Type: application/json
+        Authorization: Bearer <token>
+
+    Request Body:
+    {
+        "purchase_id": int,
+        "reason": string,
+        "refund_amount": float
+    }
+
+    Returns:
+    201: {
+        "message": string,
+        "return_id": int,
+        "status": string,
+        "details": {
+            "purchase_id": int,
+            "product_id": int,
+            "reason": string,
+            "refund_amount": float,
+            "purchase_date": string
+        }
+    }
+
+    Errors:
+    400: {
+        "error": "Missing required fields: <fields>"
+        "error": "Only completed purchases can be returned"
+        "error": "Refund amount cannot exceed original purchase price"
+    }
+    401: {"error": "Invalid or missing token"}
+    403: {"error": "Unauthorized to return this purchase"}
+    404: {"error": "Purchase not found"}
+    500: {"error": "Internal server error message"}
+    """
     data = request.get_json()
     
     try:
-        # Validate required fields
-        required_fields = ['product_name', 'customer_email', 'customer_name', 
-                         'purchase_date', 'reason', 'refund_amount']
+        required_fields = ['purchase_id', 'reason', 'refund_amount']
         missing_fields = [field for field in required_fields if not data.get(field)]
         if missing_fields:
             return jsonify({
                 'error': f'Missing required fields: {", ".join(missing_fields)}'
             }), 400
-
-        # Get product by name
-        product_name = data.get('product_name')
-        product = Product.query.filter(Product.name.ilike(product_name)).first()
-        if not product:
-            return jsonify({'error': 'Product not found'}), 404
-
-        # Verify purchase exists
-        purchase = Purchase.query.filter(
-            Purchase.product_id == product.id,
-            Purchase.customer_email == data.get('customer_email'),
-            Purchase.status == 'completed'
-        ).first()
-
+        purchase = Purchase.query.get(data.get('purchase_id'))
         if not purchase:
-            return jsonify({
-                'error': 'No completed purchase found for this product with the provided email'
-            }), 404
+            return jsonify({'error': 'Purchase not found'}), 404
 
-        # Verify return amount doesn't exceed purchase price
+        if purchase.user_id != current_user.id:
+            return jsonify({'error': 'Unauthorized to return this purchase'}), 403
+
+      
+        if purchase.status != 'completed':
+            return jsonify({'error': 'Only completed purchases can be returned'}), 400
+
+    
         if float(data.get('refund_amount')) > purchase.total_price:
             return jsonify({
                 'error': f'Refund amount cannot exceed original purchase price of {purchase.total_price}'
             }), 400
 
         # Create return order
-        return_order = OrderFactory.create_order(
-            order_type="return",
-            user_id=purchase.user_id,
-            product_id=product.id,
+        return_order = Return(
+            user_id=current_user.id,
+            product_id=purchase.product_id,
             reason=data.get('reason'),
             refund_amount=data.get('refund_amount'),
-            status='pending_approval',
-            customer_email=data.get('customer_email'),
-            customer_name=data.get('customer_name'),
+            customer_email=current_user.email,
+            customer_name=current_user.username,
             purchase_date=purchase.date,
             original_purchase_id=purchase.id
         )
+        
+        # Process the return
+        return_order.process()
         
         db.session.add(return_order)
         db.session.commit()
@@ -386,155 +841,101 @@ def create_return():
         return jsonify({
             'message': 'Return request created successfully, waiting for admin approval',
             'return_id': return_order.id,
-            'return_reference': f'RET-{return_order.id}',
             'status': 'pending_approval',
             'details': {
-                'product_name': product.name,
-                'customer_name': data.get('customer_name'),
-                'customer_email': data.get('customer_email'),
+                'purchase_id': purchase.id,
+                'product_id': purchase.product_id,
                 'reason': data.get('reason'),
                 'refund_amount': data.get('refund_amount'),
-                'purchase_date': purchase.date.strftime('%Y-%m-%d %H:%M:%S'),
-                'original_purchase_reference': f'PUR-{purchase.id}'
+                'purchase_date': purchase.date.strftime('%Y-%m-%d %H:%M:%S')
             }
         }), 201
 
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+    
 
+#Create exchange order
 @app.route('/orders/exchange', methods=['POST'])
-def create_exchange():
+@token_required
+@log_order_operation('create_exchange')
+def create_exchange(current_user):
+    """
+    Create a new exchange order for a completed purchase.
+
+    Method: POST
+    URL: http://localhost:5000/orders/exchange
+    Headers:
+        Content-Type: application/json
+        Authorization: Bearer <token>
+
+    Request Body:
+    {
+        "purchase_id": int,
+        "new_product_id": int,
+        "reason": string
+    }
+    """
     data = request.get_json()
     
     try:
-        # Validate required fields
-        required_fields = ['original_product_name', 'new_product_name', 
-                         'customer_email', 'customer_name', 'reason']
+        
+        required_fields = ['purchase_id', 'new_product_id', 'reason']
         missing_fields = [field for field in required_fields if not data.get(field)]
         if missing_fields:
             return jsonify({
                 'error': f'Missing required fields: {", ".join(missing_fields)}'
             }), 400
 
-        # Get original product
-        original_product = Product.query.filter(
-            Product.name.ilike(data.get('original_product_name'))
-        ).first()
-        if not original_product:
-            return jsonify({'error': 'Original product not found'}), 404
+    
+        purchase = Purchase.query.get(data.get('purchase_id'))
+        if not purchase:
+            return jsonify({'error': 'Purchase not found'}), 404
 
-        # Get new product
-        new_product = Product.query.filter(
-            Product.name.ilike(data.get('new_product_name'))
-        ).first()
+        
+        if purchase.user_id != current_user.id:
+            return jsonify({'error': 'Unauthorized to exchange this purchase'}), 403
+
+        
+        if purchase.status != 'completed':
+            return jsonify({'error': 'Only completed purchases can be exchanged'}), 400
+
+      
+        new_product = Product.query.get(data.get('new_product_id'))
         if not new_product:
             return jsonify({'error': 'New product not found'}), 404
 
-        # Verify original purchase exists
-        purchase = Purchase.query.filter(
-            Purchase.product_id == original_product.id,
-            Purchase.customer_email == data.get('customer_email'),
-            Purchase.status == 'completed'
-        ).first()
-
-        if not purchase:
-            return jsonify({
-                'error': 'No completed purchase found for this product with the provided email'
-            }), 404
-
         # Create exchange order
-        exchange = OrderFactory.create_order(
-            order_type="exchange",
-            user_id=purchase.user_id,
-            product_id=original_product.id,
+        exchange_order = Exchange(
+            user_id=current_user.id,
+            product_id=purchase.product_id,
             new_product_id=new_product.id,
             reason=data.get('reason'),
-            status='pending_approval',
-            customer_email=data.get('customer_email'),
-            customer_name=data.get('customer_name'),
+            customer_email=current_user.email,
+            customer_name=current_user.username,
             purchase_date=purchase.date,
             original_purchase_id=purchase.id
         )
         
-        db.session.add(exchange)
+        # Process the exchange
+        exchange_order.process()
+        
+        db.session.add(exchange_order)
         db.session.commit()
 
         return jsonify({
             'message': 'Exchange request created successfully, waiting for admin approval',
-            'exchange_id': exchange.id,
-            'exchange_reference': f'EXC-{exchange.id}',
+            'exchange_id': exchange_order.id,
             'status': 'pending_approval',
             'details': {
-                'original_product': original_product.name,
-                'new_product': new_product.name,
-                'customer_name': data.get('customer_name'),
-                'customer_email': data.get('customer_email'),
+                'purchase_id': purchase.id,
+                'original_product_id': purchase.product_id,
+                'new_product_id': new_product.id,
                 'reason': data.get('reason'),
-                'purchase_date': purchase.date.strftime('%Y-%m-%d %H:%M:%S'),
-                'original_purchase_reference': f'PUR-{purchase.id}'
+                'purchase_date': purchase.date.strftime('%Y-%m-%d %H:%M:%S')
             }
         }), 201
-
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-# Admin approval routes
-@app.route('/orders/<int:order_id>/approve', methods=['POST'])
-@admin_required
-def approve_order(current_user, order_id):
-    try:
-        order = Order.query.get(order_id)
-        if not order:
-            return jsonify({'error': 'Order not found'}), 404
-
-        if order.type not in ['return', 'exchange']:
-            return jsonify({'error': 'Only return and exchange orders need approval'}), 400
-
-        if order.status != 'pending_approval':
-            return jsonify({'error': 'Order is not pending approval'}), 400
-
-        # Process the approval based on order type
-        if order.type == 'return':
-            # Update stock for physical products
-            product = Product.query.get(order.product_id)
-            if isinstance(product, PhysicalProduct):
-                product.stock += 1
-                db.session.add(product)
-            
-            order.status = 'approved'
-            order.approved_by = current_user.id
-            order.approved_at = datetime.utcnow()
-            
-        elif order.type == 'exchange':
-            # Handle stock updates for exchange
-            old_product = Product.query.get(order.product_id)
-            new_product = Product.query.get(order.new_product_id)
-            
-            if isinstance(old_product, PhysicalProduct):
-                old_product.stock += 1
-                db.session.add(old_product)
-            
-            if isinstance(new_product, PhysicalProduct):
-                if new_product.stock > 0:
-                    new_product.stock -= 1
-                    db.session.add(new_product)
-                else:
-                    return jsonify({'error': 'New product out of stock'}), 400
-            
-            order.status = 'approved'
-            order.approved_by = current_user.id
-            order.approved_at = datetime.utcnow()
-
-        db.session.add(order)
-        db.session.commit()
-
-        return jsonify({
-            'message': f'{order.type.capitalize()} order approved successfully',
-            'order_id': order.id,
-            'status': 'approved'
-        }), 200
 
     except Exception as e:
         db.session.rollback()
@@ -544,6 +945,39 @@ def approve_order(current_user, order_id):
 @app.route('/orders/return/<int:return_id>/approve', methods=['POST'])
 @admin_required
 def approve_return(current_user, return_id):
+    """
+    Approve or reject a return request. Admin only.
+
+    Method: POST
+    URL: http://localhost:5000/orders/return/<return_id>/approve
+    Headers: 
+        Content-Type: application/json
+        Authorization: Bearer <token>
+
+    Request Body:
+    {
+        "approved": boolean,     # True to approve, False to reject
+        "admin_notes": string    # Optional notes about decision
+    }
+
+    Returns:
+    - 200: Return request processed successfully
+        {
+            "message": string,
+            "return_reference": string,
+            "status": string,
+            "details": {
+                "product_name": string,
+                "product_type": string,
+                "customer_name": string,      # Only included if approved
+                "customer_email": string,     # Only included if approved
+                "refund_amount": number,      # Only included if approved
+                "admin_notes": string,
+                "approved_at"/"rejected_at": string,
+                "approved_by"/"rejected_by": string
+            }
+        }
+"""
     try:
         return_order = Return.query.get(return_id)
         if not return_order:
@@ -556,19 +990,19 @@ def approve_return(current_user, return_id):
         approved = data.get('approved', True)
         admin_notes = data.get('admin_notes', '')
 
-        # Get the product
+     
         product = Product.query.get(return_order.product_id)
         if not product:
             return jsonify({'error': 'Product not found'}), 404
 
         if approved:
-            # Approve return
+            
             return_order.status = 'approved'
             return_order.admin_notes = admin_notes
             return_order.approved_by = current_user.id
             return_order.approved_at = datetime.utcnow()
 
-            # Update stock only if it's a physical product
+            
             if hasattr(product, 'stock'):
                 product.stock += 1
                 db.session.add(product)
@@ -618,10 +1052,43 @@ def approve_return(current_user, return_id):
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+
 # Admin approval route for exchanges
 @app.route('/orders/exchange/<int:exchange_id>/approve', methods=['POST'])
 @admin_required
 def approve_exchange(current_user, exchange_id):
+    """
+    Approve or reject an exchange request. Admin only.
+
+    Method: POST
+    URL: http://localhost:5000/orders/exchange/<exchange_id>/approve
+    Headers: 
+        Content-Type: application/json
+        Authorization: Bearer <token>
+
+    Request Body:
+    {
+        "approved": boolean,     # True to approve, False to reject
+        "admin_notes": string    # Optional notes about decision
+    }
+
+    Returns:
+    - 200: Exchange request processed successfully
+        {
+            "message": string,
+            "exchange_reference": string,
+            "status": string,
+            "details": {
+                "original_product": string,
+                "new_product": string,
+                "customer_name": string,      # Only included if approved
+                "customer_email": string,     # Only included if approved
+                "admin_notes": string,
+                "approved_at"/"rejected_at": string,
+                "approved_by"/"rejected_by": string
+            }
+        }
+"""
     try:
         exchange = Exchange.query.get(exchange_id)
         if not exchange:
@@ -634,7 +1101,6 @@ def approve_exchange(current_user, exchange_id):
         approved = data.get('approved', True)
         admin_notes = data.get('admin_notes', '')
 
-        # Get both products
         original_product = Product.query.get(exchange.product_id)
         new_product = Product.query.get(exchange.new_product_id)
         
@@ -642,13 +1108,13 @@ def approve_exchange(current_user, exchange_id):
             return jsonify({'error': 'Products not found'}), 404
 
         if approved:
-            # Approve exchange
+           
             exchange.status = 'approved'
             exchange.admin_notes = admin_notes
             exchange.approved_by = current_user.id
             exchange.approved_at = datetime.utcnow()
 
-            # Update stock for physical products
+            
             if hasattr(original_product, 'stock'):
                 original_product.stock += 1
                 db.session.add(original_product)
@@ -675,7 +1141,7 @@ def approve_exchange(current_user, exchange_id):
                 }
             }), 200
         else:
-            # Reject exchange
+          
             exchange.status = 'rejected'
             exchange.admin_notes = admin_notes
             exchange.rejected_by = current_user.id
@@ -701,140 +1167,38 @@ def approve_exchange(current_user, exchange_id):
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
-# View orders
-@app.route('/orders', methods=['GET'])
-@token_required
-def get_orders(current_user):
-    try:
-        # Regular users can only see their orders
-        # Admins can see all orders
-        if current_user.type == 'administrator':
-            orders = Order.query.all()
-        else:
-            orders = Order.query.filter_by(user_id=current_user.id).all()
-
-        return jsonify({
-            'orders': [{
-                'id': order.id,
-                'type': order.type,
-                'status': order.status,
-                'date': order.date,
-                'details': order.get_details()
-            } for order in orders]
-        }), 200
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# GET - Get all products (no authentication required)
-@app.route('/products', methods=['GET'])
-def get_products():
-    try:
-        products = Product.query.all()
-        return jsonify({
-            'products': [{
-                'id': product.id,
-                'name': product.name,
-                'description': product.description,
-                'price': product.price,
-                'type': product.type,
-                'details': product.get_details()
-            } for product in products]
-        }), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# GET - Get specific product by ID (no authentication required)
-@app.route('/products/<int:product_id>', methods=['GET'])
-def get_product(product_id):
-    try:
-        product = Product.query.get(product_id)
-        if not product:
-            return jsonify({'error': 'Product not found'}), 404
-            
-        return jsonify({
-            'id': product.id,
-            'name': product.name,
-            'description': product.description,
-            'price': product.price,
-            'type': product.type,
-            'details': product.get_details()
-        }), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# UPDATE - Update product (admin only)
-@app.route('/products/<int:product_id>', methods=['PUT'])
-@admin_required
-def update_product(current_user, product_id):
-    try:
-        product = Product.query.get(product_id)
-        if not product:
-            return jsonify({'error': 'Product not found'}), 404
-
-        data = request.get_json()
-        
-        # Update basic attributes
-        if 'name' in data:
-            product.name = data['name']
-        if 'description' in data:
-            product.description = data['description']
-        if 'price' in data:
-            product.price = data['price']
-            
-        # Update type-specific attributes
-        if product.type == 'physical':
-            if 'weight' in data:
-                product.weight = data['weight']
-            if 'stock' in data:
-                product.stock = data['stock']
-        elif product.type == 'digital':
-            if 'file_size' in data:
-                product.file_size = data['file_size']
-            if 'download_link' in data:
-                product.download_link = data['download_link']
-                
-        db.session.commit()
-        
-        return jsonify({
-            'message': 'Product updated successfully',
-            'product': {
-                'id': product.id,
-                'name': product.name,
-                'description': product.description,
-                'price': product.price,
-                'type': product.type,
-                'details': product.get_details()
-            }
-        }), 200
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-# DELETE - Delete product (admin only)
-@app.route('/products/<int:product_id>', methods=['DELETE'])
-@admin_required
-def delete_product(current_user, product_id):
-    try:
-        product = Product.query.get(product_id)
-        if not product:
-            return jsonify({'error': 'Product not found'}), 404
-            
-        db.session.delete(product)
-        db.session.commit()
-        
-        return jsonify({
-            'message': 'Product deleted successfully',
-            'product_id': product_id
-        }), 200
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-# Add to cart (requires authentication)
+# Add to cart 
 @app.route('/cart/add', methods=['POST'])
 @token_required
+@log_cart_operation('add_to_cart')
 def add_to_cart(current_user):
+    """
+    Add a product to the user's shopping cart.
+
+    Method: POST
+    URL: http://localhost:5000/cart/add
+    Headers:
+        Content-Type: application/json
+        Authorization: Bearer <token>
+
+    Request Body:
+    {
+        "product_id": int,     # ID of product to add
+        "quantity": int        # Optional - Quantity to add (default: 1)
+    }
+
+    Returns:
+    201: {
+        "message": string,     # Success message
+        "cart_item": {
+            "id": int,         # Cart item ID
+            "product_id": int, # Product ID
+            "quantity": int,   # Quantity
+            "price": float,    # Unit price
+            "total": float     # Total price
+        }
+    }
+    """
     try:
         data = request.get_json()
         product_id = data.get('product_id')
@@ -857,10 +1221,32 @@ def add_to_cart(current_user):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Get cart contents (requires authentication)
+# Get cart contents 
 @app.route('/cart', methods=['GET'])
 @token_required
 def get_cart(current_user):
+    """
+    Get contents of the user's shopping cart.
+
+    Method: GET
+    URL: http://localhost:5000/cart
+    Headers:
+        Authorization: Bearer <token>
+
+    Returns:
+    200: {
+        "items": [
+            {
+                "id": int,          # Cart item ID
+                "product_id": int,  # Product ID
+                "quantity": int,    # Quantity
+                "price": float,     # Unit price
+                "total": float      # Total price for this item
+            }
+        ],
+        "total": float             # Total price for all items
+    }
+    """
     try:
         cart_items = Cart.get_user_cart(current_user.id)
         
@@ -872,10 +1258,23 @@ def get_cart(current_user):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Clear cart (requires authentication)
+# Clear cart 
 @app.route('/cart/clear', methods=['DELETE'])
 @token_required
 def clear_cart(current_user):
+    """
+    Clear all items from the user's shopping cart.
+
+    Method: DELETE
+    URL: http://localhost:5000/cart/clear
+    Headers:
+        Authorization: Bearer <token>
+
+    Returns:
+    200: {
+        "message": string      # Success message
+    }
+    """
     try:
         success, message = Cart.clear_cart(current_user.id)
         
@@ -887,11 +1286,53 @@ def clear_cart(current_user):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+#Complete purchase 
+@app.route('/cart/complete', methods=['POST'])
+@token_required
+@log_cart_operation('complete_purchase')
+def complete_cart(current_user):
+    """
+    Complete purchase of all items in user's cart.
+
+    Method: POST
+    URL: http://localhost:5000/cart/complete
+    Headers:
+        Authorization: Bearer <token>
+
+    Returns:
+    200: {
+        "message": string,      # Success message
+        "purchase_ids": [       # List of created purchase IDs
+            int,
+            ...
+        ]
+    }
+    """
+    try:
+
+        purchases, message = Cart.complete_purchase(
+            user_id=current_user.id,
+            user_email=current_user.email,
+            user_name=current_user.username
+        )
+        
+        if not purchases:
+            return jsonify({'message': message}), 400
+            
+        return jsonify({
+            'message': 'Purchase completed successfully',
+            'purchase_ids': [purchase.id for purchase in purchases]
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/reset-db', methods=['POST'])
 def reset_database():
     try:
         with db.engine.connect() as connection:
-            # Drop tables in correct order
+            # Drop child tables first
             connection.execute(text("DROP TABLE IF EXISTS cart_items CASCADE;"))
             connection.execute(text("DROP TABLE IF EXISTS returns CASCADE;"))
             connection.execute(text("DROP TABLE IF EXISTS exchanges CASCADE;"))
@@ -900,6 +1341,7 @@ def reset_database():
             connection.execute(text("DROP TABLE IF EXISTS physical_products CASCADE;"))
             connection.execute(text("DROP TABLE IF EXISTS digital_products CASCADE;"))
             connection.execute(text("DROP TABLE IF EXISTS products CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS customers CASCADE;"))
             connection.execute(text("DROP TABLE IF EXISTS administrators CASCADE;"))
             connection.execute(text("DROP TABLE IF EXISTS users CASCADE;"))
             connection.commit()
@@ -910,21 +1352,6 @@ def reset_database():
         return jsonify({'message': 'Database reset successfully'}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
+    
 if __name__ == '__main__':
-    with app.app_context():
-        print("Dropping all tables...")
-        with db.engine.connect() as connection:
-            connection.execute(text("DROP TABLE IF EXISTS cart_items CASCADE;"))
-            connection.execute(text("DROP TABLE IF EXISTS returns CASCADE;"))
-            connection.execute(text("DROP TABLE IF EXISTS purchases CASCADE;"))
-            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
-            connection.execute(text("DROP TABLE IF EXISTS administrators CASCADE;"))
-            connection.execute(text("DROP TABLE IF EXISTS users CASCADE;"))
-            connection.execute(text("DROP TABLE IF EXISTS products CASCADE;"))
-            connection.commit()
-        
-        print("Creating all tables...")
-        db.create_all()
-        print("Database tables created successfully!")
     app.run(debug=True)

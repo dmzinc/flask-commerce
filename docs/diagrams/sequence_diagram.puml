@@ -1,0 +1,27 @@
+
+@startuml return_exchange_sequence
+actor Customer
+participant "API" as API
+participant "Order" as Order
+participant "Return/Exchange" as RetEx
+participant "Admin" as Admin
+
+Customer -> API: POST /orders/return or /orders/exchange
+activate API
+API -> Order: Validate purchase
+activate Order
+Order --> API: Purchase validated
+deactivate Order
+API -> RetEx: Create request
+activate RetEx
+RetEx -> RetEx: process()
+RetEx --> API: Request created
+deactivate RetEx
+API --> Customer: Confirmation & ID
+deactivate API
+Admin -> API: POST /orders/{id}/approve
+activate API
+API -> RetEx: Update status
+API --> Admin: Confirmation
+deactivate API
+@enduml

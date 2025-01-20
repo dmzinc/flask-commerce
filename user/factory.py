@@ -4,6 +4,9 @@ from user.admin import Administrator
 class UserFactory:
     @staticmethod
     def create_user(user_type, **kwargs):
+        if 'id' in kwargs:
+            del kwargs['id']
+            
         if user_type == "customer":
             return Customer(**kwargs)
         elif user_type == "administrator":

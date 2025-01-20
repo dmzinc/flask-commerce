@@ -1,0 +1,89 @@
+
+@startuml ecommerce_class_diagram
+abstract class Order {
+  +id: Integer
+  +user_id: Integer
+  +product_id: Integer
+  +date: DateTime
+  +status: String
+  +type: String
+  +quantity: Integer
+  +total_price: Float
+  +{abstract} process()
+  +get_details()
+}
+
+class Purchase {
+  +shipping_address: String
+  +payment_method: String
+  +process()
+}
+
+class Cart {
+  +process()
+  +check_stock()
+  +to_dict()
+}
+
+class Return {
+  +reason: String
+  +refund_amount: Float
+  +customer_email: String
+  +customer_name: String
+  +purchase_date: DateTime
+  +original_purchase_id: Integer
+  +admin_notes: String
+  +process()
+}
+
+class Exchange {
+  +new_product_id: Integer
+  +reason: String
+  +customer_email: String
+  +customer_name: String
+  +purchase_date: DateTime
+  +original_purchase_id: Integer
+  +admin_notes: String
+  +process()
+}
+
+class User {
+  +id: Integer
+  +email: String
+  +role: String
+  +authenticate()
+  +get_orders()
+}
+
+class Product {
+  +id: Integer
+  +name: String
+  +price: Float
+  +description: String
+  +get_details()
+}
+
+class PhysicalProduct {
+  +weight: Float
+  +stock: Integer
+  +check_stock()
+}
+
+class DigitalProduct {
+  +file_size: Float
+  +download_link: String
+  +generate_download_link()
+}
+
+Order <|-- Purchase
+Order <|-- Cart
+Order <|-- Return
+Order <|-- Exchange
+
+Product <|-- PhysicalProduct
+Product <|-- DigitalProduct
+
+Order "*" -- "1" User: placed by >
+Order "*" -- "1" Product: contains >
+Cart "*" -- "*" Product: contains >
+@enduml

@@ -1,16 +1,14 @@
 from orders.order import Order
+from orders.purchase import Purchase
 from db import db
 from datetime import datetime
 from product.physical import PhysicalProduct
 from product.digital import DigitalProduct
+from utils.logger import logger, cart_logger
 
 class Cart(Order):
     __tablename__ = 'cart_items'
     id = db.Column(db.Integer, db.ForeignKey('orders.id'), primary_key=True)
-    quantity = db.Column(db.Integer, default=1)
-    total_price = db.Column(db.Float, nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)  # Make user_id required
-    
     __mapper_args__ = {
         'polymorphic_identity': 'cart'
     }
@@ -19,13 +17,13 @@ class Cart(Order):
         """Check if product is in stock and quantity is available"""
         if isinstance(product, PhysicalProduct):
             if product.stock == 0:
-                return False, "Product is out of stock"
+                return False, 
             elif product.stock < self.quantity:
                 return False, f"Only {product.stock} items available in stock"
-            return True, "Product available"
+            return True,
         elif isinstance(product, DigitalProduct):
-            return True, "Digital product available"
-        return False, "Invalid product type"
+            return True, 
+        return False,
 
     def process(self):
         """Process the cart item"""
@@ -41,9 +39,8 @@ class Cart(Order):
         }
 
     def to_dict(self):
-        """Convert cart item to dictionary"""
         from product.product import Product
-        product = Product.query.get(self.product_id)
+        product = db.session.get(Product, self.product_id)
         return {
             'id': self.id,
             'product_id': self.product_id,
@@ -63,7 +60,7 @@ class Cart(Order):
     def add_to_cart(cls, product_id, quantity, user_id):
         """Add item to cart"""
         from product.product import Product
-        product = Product.query.get(product_id)
+        product = db.session.get(Product, product_id)
         if not product:
             return None, "Product not found"
 
@@ -95,7 +92,7 @@ class Cart(Order):
             if not cart_item.id:
                 db.session.add(cart_item)
             db.session.commit()
-            return cart_item, "Item added to cart successfully"
+            return cart_item,
         except Exception as e:
             db.session.rollback()
             return None, str(e)
@@ -109,7 +106,52 @@ class Cart(Order):
                 status='in_cart'
             ).delete()
             db.session.commit()
-            return True, "Cart cleared successfully"
+            return True, 
         except Exception as e:
             db.session.rollback()
-            return False, str(e) 
+            return False, str(e)
+
+    @classmethod
+    def complete_purchase(cls, user_id, user_email, user_name):
+        """Convert cart items to purchase orders"""
+        logger.info(f"User {user_email} attempting to complete purchase")
+        
+        try:
+            cart_items = cls.query.filter_by(user_id=user_id, status='in_cart').all()
+            if not cart_items:
+                logger.warning(f"No items in cart for user {user_email}")
+                return None, "No items in cart"
+
+            purchases = []
+            for cart_item in cart_items:
+              
+                purchase = Purchase(
+                    user_id=user_id,
+                    product_id=cart_item.product_id,
+                    quantity=cart_item.quantity,
+                    total_price=cart_item.total_price,
+                    customer_email=user_email,
+                    customer_name=user_name
+                )
+                
+                # Process the purchase
+                purchase.process()
+                db.session.add(purchase)
+                
+                # Mark cart item as completed
+                cart_item.status = 'completed'
+                purchases.append(purchase)
+            
+            db.session.commit()
+            cart_logger.info(
+                f"Purchase completed for user {user_email}. "
+                f"Total items: {len(purchases)}. "
+                f"Purchase IDs: {[p.id for p in purchases]}"
+            )
+            
+            return purchases,
+            
+        except Exception as e:
+            logger.error(f"Error completing purchase for user {user_email}: {str(e)}")
+            db.session.rollback()
+            return None, str(e) 
