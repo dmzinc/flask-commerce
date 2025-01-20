@@ -5,9 +5,11 @@ This is a Flask-based API for an e-commerce platform, featuring user authenticat
 
 ## Installation
 
-### 1. Clone the Repository```bash
+### 1. Clone the Repository
+```bash
 git clone https://github.com/dmzinc/flask-commerce.git
-cd flask-commerce```
+cd flask-commerce
+```
 
 ### 2. Create and activate conda environment:
 ```bash
@@ -20,18 +22,12 @@ conda activate ecommerce
 DATABASE_URL=postgresql://username:password@localhost:5432/dbname
 JWT_SECRET_KEY=your_secret_key
 ```
-
-### 4. Initialize the database:
+### 4. Run the application:
 ```bash
 python main.py
 ```
 
-### 5. Run the application:
-```bash
-python main.py
-```
-
-### 6. Run tests:
+### 5. Run tests:
 ```bash
 pytest tests/
 ```
