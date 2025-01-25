@@ -42,7 +42,10 @@ def token_required(f):
             token = token.split(' ')[1]
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
             current_user = User.query.get(data['user_id'])
-        except:
+            if not current_user:
+                return jsonify({'error': 'User not found'}), 404
+        except Exception as e:
+            print(f"Token validation error: {str(e)}")  # Debug print
             return jsonify({'error': 'Token is invalid'}), 401
 
         return f(current_user, *args, **kwargs)
@@ -157,53 +160,50 @@ def create_users():
 @app.route('/login', methods=['POST'])
 @log_user_operation('user_login')
 def login():
-    """
-    Authenticate user and get JWT token.
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        username = data.get('username')
+        password = data.get('password')
 
-    Method: POST
-    URL: http://localhost:5000/login
-    Headers: 
-        Content-Type: application/json
+        if not password:
+            return jsonify({'error': 'Password is required'}), 400
 
-    Request Body:
-    {
-        "email": string,      # User's email
-        "password": string    # User's password
-    }
+        # Try email first, then username
+        if email:
+            user = User.query.filter_by(email=email).first()
+        elif username:
+            user = User.query.filter_by(username=username).first()
+        else:
+            return jsonify({'error': 'Email or username is required'}), 400
 
-    Returns:
-    200: {
-        "token": string,      # JWT token
-        "user": {
-            "id": int,
-            "username": string,
-            "email": string,
-            "user_type": string
-        }
-    }
-    """
-    data = request.get_json()
-    user = User.query.filter_by(username=data.get('username')).first()
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
 
-    if user and user.verify_password(data.get('password')):
-        token = jwt.encode(
-            payload={
-                'user_id': user.id,
-                'exp': datetime.utcnow() + timedelta(hours=24)
-            },
-            key=str(app.config['SECRET_KEY']),
-            algorithm='HS256'
-        )
+        # Get hashed password from user model
+        hashed_password = user.password_hash if hasattr(user, 'password_hash') else user.password
+
+        if not check_password_hash(hashed_password, password):
+            return jsonify({'error': 'Invalid password'}), 401
+
+        # Generate token
+        token = jwt.encode({
+            'user_id': user.id,
+            'exp': datetime.utcnow() + timedelta(days=1)
+        }, app.config['SECRET_KEY'])
+
+        # Convert bytes to string if needed
+        if isinstance(token, bytes):
+            token = token.decode('utf-8')
 
         return jsonify({
             'token': token,
-            'user_id': user.id,
-            'username': user.username,
-            'email': user.email,
             'user_type': user.type
-        })
-    
-    return jsonify({'error': 'Invalid credentials'}), 401
+        }), 200
+
+    except Exception as e:
+        print(f"Login error: {str(e)}")  # Debug print
+        return jsonify({'error': str(e)}), 500
 
 # Get all users
 @app.route('/users', methods=['GET'])
@@ -1172,53 +1172,50 @@ def approve_exchange(current_user, exchange_id):
 @token_required
 @log_cart_operation('add_to_cart')
 def add_to_cart(current_user):
-    """
-    Add a product to the user's shopping cart.
-
-    Method: POST
-    URL: http://localhost:5000/cart/add
-    Headers:
-        Content-Type: application/json
-        Authorization: Bearer <token>
-
-    Request Body:
-    {
-        "product_id": int,     # ID of product to add
-        "quantity": int        # Optional - Quantity to add (default: 1)
-    }
-
-    Returns:
-    201: {
-        "message": string,     # Success message
-        "cart_item": {
-            "id": int,         # Cart item ID
-            "product_id": int, # Product ID
-            "quantity": int,   # Quantity
-            "price": float,    # Unit price
-            "total": float     # Total price
-        }
-    }
-    """
     try:
         data = request.get_json()
+        
+        # Validate request data
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+            
         product_id = data.get('product_id')
+        if not product_id:
+            return jsonify({'error': 'Product ID is required'}), 400
+            
         quantity = data.get('quantity', 1)
+        
+        # Check if product exists
+        product = Product.query.get(product_id)
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
 
-        cart_item, message = Cart.add_to_cart(
+        # Create cart item
+        cart_item = Cart(
+            user_id=current_user.id,
             product_id=product_id,
             quantity=quantity,
-            user_id=current_user.id
+            total_price=product.price * quantity,
+            status='in_cart'
         )
 
-        if not cart_item:
+        # Check stock availability
+        stock_available, message = cart_item.check_stock(product)
+        if not stock_available:
             return jsonify({'error': message}), 400
 
+        # Save to database
+        db.session.add(cart_item)
+        db.session.commit()
+
         return jsonify({
-            'message': message,
+            'message': 'Item added to cart successfully',
             'cart_item': cart_item.to_dict()
         }), 201
 
     except Exception as e:
+        db.session.rollback()
+        print(f"Add to cart error: {str(e)}")  # Debug print
         return jsonify({'error': str(e)}), 500
 
 # Get cart contents 
@@ -1291,41 +1288,48 @@ def clear_cart(current_user):
 @token_required
 @log_cart_operation('complete_purchase')
 def complete_cart(current_user):
-    """
-    Complete purchase of all items in user's cart.
-
-    Method: POST
-    URL: http://localhost:5000/cart/complete
-    Headers:
-        Authorization: Bearer <token>
-
-    Returns:
-    200: {
-        "message": string,      # Success message
-        "purchase_ids": [       # List of created purchase IDs
-            int,
-            ...
-        ]
-    }
-    """
     try:
-
-        purchases, message = Cart.complete_purchase(
+        # Get all cart items for user
+        cart_items = Cart.query.filter_by(
             user_id=current_user.id,
-            user_email=current_user.email,
-            user_name=current_user.username
-        )
-        
-        if not purchases:
-            return jsonify({'message': message}), 400
+            status='in_cart'
+        ).all()
+
+        if not cart_items:
+            return jsonify({'error': 'No items in cart'}), 400
+
+        # Create purchase orders
+        purchase_ids = []
+        for cart_item in cart_items:
+            # Create purchase order
+            purchase = Purchase(
+                user_id=current_user.id,
+                product_id=cart_item.product_id,
+                quantity=cart_item.quantity,
+                total_price=cart_item.total_price,
+                status='completed'
+            )
+            db.session.add(purchase)
+            purchase_ids.append(purchase.id)
             
+            # Update product stock if physical
+            product = Product.query.get(cart_item.product_id)
+            if isinstance(product, PhysicalProduct):
+                product.stock -= cart_item.quantity
+            
+            # Delete cart item
+            db.session.delete(cart_item)
+
+        db.session.commit()
+
         return jsonify({
             'message': 'Purchase completed successfully',
-            'purchase_ids': [purchase.id for purchase in purchases]
+            'purchase_ids': purchase_ids
         }), 200
-        
+
     except Exception as e:
         db.session.rollback()
+        print(f"Complete cart error: {str(e)}")  # Debug print
         return jsonify({'error': str(e)}), 500
 
 @app.route('/reset-db', methods=['POST'])
@@ -1351,6 +1355,28 @@ def reset_database():
         
         return jsonify({'message': 'Database reset successfully'}), 200
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/orders', methods=['GET'])
+@token_required
+@log_order_operation('get_orders')
+def get_orders(current_user):
+    """Get orders for the current user or all orders for admin"""
+    try:
+        # Check if admin by checking the type attribute
+        if current_user.type == 'administrator':
+            # Admin can see all orders
+            purchases = Purchase.query.all()
+        else:
+            # Customers can only see their own orders
+            purchases = Purchase.query.filter_by(user_id=current_user.id).all()
+
+        return jsonify({
+            'orders': [purchase.to_dict() for purchase in purchases]
+        }), 200
+
+    except Exception as e:
+        print(f"Get orders error: {str(e)}")  # Debug print
         return jsonify({'error': str(e)}), 500
     
 if __name__ == '__main__':

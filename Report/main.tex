@@ -78,7 +78,7 @@ The following diagrams illustrate the key design patterns used in this project a
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.8\textwidth]{docs/diagrams/class_diagram.png}
+    \includegraphics[width=0.8\textwidth]{UML diagrams/class_diagram.png}
     \caption{Class Diagram Showing Design Patterns}
 \end{figure}
 
@@ -92,7 +92,7 @@ The class diagram demonstrates the inheritance hierarchies and relationships bet
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.8\textwidth]{docs/diagrams/sequence_diagram.png}
+    \includegraphics[width=0.8\textwidth]{UML diagrams/sequence_diagram.png}
     \caption{Sequence Diagram of Pattern Interactions}
 \end{figure}
 
@@ -106,7 +106,7 @@ The sequence diagram shows the interaction flow for return/exchange processing:
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.8\textwidth]{docs/diagrams/state_diagram.png}
+    \includegraphics[width=0.8\textwidth]{UML diagrams/state_diagram.png}
     \caption{State Diagram Showing Order Processing States}
 \end{figure}
 
@@ -489,80 +489,98 @@ The system is built using Flask framework with Supabase as the database backend,
 \section{Testing Strategy}
 
 \subsection{Unit Testing Approach}
-The testing strategy focused on three main areas using the pytest framework:
+The testing strategy utilizes pytest framework with fixtures and mocking to test core functionality:
 
 \begin{itemize}
     \item \textbf{Authentication Testing}
     \begin{itemize}
-        \item JWT token generation and validation
-        \item User registration validation
-        \item Role-based access control verification
+        \item User registration validation with username/email uniqueness
+        \item Password hashing and verification
+        \item JWT token generation and validation for protected routes
     \end{itemize}
 
     \item \textbf{Product Management Testing}
     \begin{itemize}
-        \item Product creation with different types
-        \item Stock management for physical products
-        \item Product attribute validation
+        \item Creation of physical and digital products via factory
+        \item Stock tracking for physical products
+        \item Product attribute validation and type checking
     \end{itemize}
 
-    \item \textbf{Order Processing Testing}
+    \item \textbf{Cart and Order Testing}
     \begin{itemize}
-        \item Cart operations and validation
-        \item Order state transitions
-        \item Stock updates during purchases
+        \item Adding/removing items from cart
+        \item Cart total calculation
+        \item Order creation and processing
+        \item Stock updates during purchase
     \end{itemize}
 \end{itemize}
 
-\subsection{Test Coverage Analysis}
-Test coverage was measured using pytest-cov, focusing on critical components:
+\subsection{Test Implementation}
+The tests utilize pytest fixtures for setup and teardown:
 
-\begin{table}[h]
-\begin{tabular}{|l|c|l|}
-\hline
-\textbf{Component} & \textbf{Coverage} & \textbf{Key Areas} \\
-\hline
-Authentication & 85\% & Token handling, user validation \\
-Product Management & 78\% & CRUD operations, type handling \\
-Order Processing & 90\% & State management, cart operations \\
-\hline
-\end{tabular}
-\caption{Component Test Coverage}
-\end{table}
+\begin{minted}{python}
+def test_add_to_cart(client, app, test_product):
+    # Create test user
+    response = client.post('/users', json={
+        'username': 'customer',
+        'email': 'customer@example.com',
+        'password': 'pass123',
+        'user_type': 'customer'
+    })
+    
+    # Login and get token
+    login_response = client.post('/login', json={
+        'username': 'customer',
+        'password': 'pass123'
+    })
+    token = json.loads(login_response.data)['token']
+    
+    # Test cart functionality
+    cart_response = client.post('/cart/add',
+        json={
+            'product_id': test_product['id'],
+            'quantity': 1
+        },
+        headers={'Authorization': f'Bearer {token}'}
+    )
+    assert cart_response.status_code == 201
+\end{minted}
 
 \subsection{Integration Testing}
-Integration tests verified the interaction between components:
+Integration tests verify component interactions:
 
 \begin{itemize}
-    \item \textbf{Order Workflow Testing}
+    \item \textbf{End-to-End Order Flow}
     \begin{itemize}
-        \item Product creation to order completion
-        \item Stock updates during order processing
-        \item Order state transitions
+        \item User registration and authentication
+        \item Adding products to cart
+        \item Completing purchase order
     \end{itemize}
 
-    \item \textbf{User Session Testing}
+    \item \textbf{Authentication Flow}
     \begin{itemize}
-        \item Authentication to order placement
-        \item Role-based access restrictions
-        \item Session management
+        \item User registration with role assignment
+        \item Login with JWT token generation
+        \item Protected route access control
     \end{itemize}
 \end{itemize}
 
 \subsection{Test Environment}
-Tests were executed in a controlled environment with:
+Tests run in an isolated environment with:
 \begin{itemize}
-    \item Isolated Supabase test project
-    \item Mocked external services
-    \item Automated test fixtures
+    \item SQLite test database
+    \item Pytest fixtures for test data
+    \item Flask test client for API requests
+    \item JWT token authentication
 \end{itemize}
 
 \subsection{Testing Challenges}
-Key challenges encountered during testing included:
+Key challenges addressed include:
 \begin{itemize}
-    \item Testing concurrent stock updates in Supabase
-    \item Simulating various order scenarios
-    \item Maintaining test data consistency
+    \item Managing test database state between tests
+    \item Simulating authenticated requests
+    \item Testing order processing workflows
+    \item Maintaining consistent test data
 \end{itemize}
 
 \section{Future Improvements}

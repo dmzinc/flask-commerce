@@ -38,10 +38,10 @@ def admin_token(client):
         'user_type': 'administrator'
     })
     assert response.status_code == 201
-    
-    # Login as admin
+
+    # Login with email instead of username
     response = client.post('/login', json={
-        'username': 'admin',
+        'email': 'admin@example.com',
         'password': 'admin123'
     })
     assert response.status_code == 200
@@ -57,11 +57,12 @@ def test_product(app, client):
         'user_type': 'administrator'
     })
     
-    # Login as admin
+    # Login as admin - use email instead of username
     login_response = client.post('/login', json={
-        'username': 'admin',
+        'email': 'admin@example.com',
         'password': 'admin123'
     })
+    assert login_response.status_code == 200
     token = json.loads(login_response.data)['token']
     
     # Create test product

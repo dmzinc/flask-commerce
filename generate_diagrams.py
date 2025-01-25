@@ -3,7 +3,7 @@ import os
 
 def generate_diagrams():
     # Create directories
-    os.makedirs('docs/diagrams', exist_ok=True)
+    os.makedirs('UML diagrams/', exist_ok=True)
     
     # Sequence diagram content
     sequence_content = """
@@ -148,7 +148,7 @@ Rejected --> [*]
     }
 
     for filename, content in diagrams.items():
-        with open(f'docs/diagrams/{filename}', 'w') as f:
+        with open(f'UML diagrams/{filename}', 'w') as f:
             f.write(content)
 
     # Create PlantUML instance
@@ -157,8 +157,8 @@ Rejected --> [*]
     # Generate all diagrams
     for diagram in diagrams.keys():
         try:
-            input_file = f'docs/diagrams/{diagram}'
-            output_file = f'docs/diagrams/{diagram.replace(".puml", ".png")}'
+            input_file = f'UML diagrams/{diagram}'
+            output_file = f'UML diagrams/{diagram.replace(".puml", ".png")}'
             pu.processes_file(input_file, outfile=output_file)
             print(f"Generated {diagram.replace('.puml', '.png')}")
         except Exception as e:
@@ -166,4 +166,4 @@ Rejected --> [*]
 
 if __name__ == '__main__':
     generate_diagrams()
-    print("All diagrams generated successfully in docs/diagrams/")
+    print("All diagrams generated successfully in UML diagrams/")

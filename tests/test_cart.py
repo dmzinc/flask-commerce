@@ -2,7 +2,7 @@ import pytest
 import json
 
 def test_add_to_cart(client, app, test_product):
- 
+    # Create user
     response = client.post('/users', json={
         'username': 'customer',
         'email': 'customer@example.com',
@@ -10,23 +10,26 @@ def test_add_to_cart(client, app, test_product):
         'user_type': 'customer'
     })
     assert response.status_code == 201
-    
-    
+
+    # Login
     login_response = client.post('/login', json={
-        'username': 'customer',
+        'email': 'customer@example.com',  # Changed from username to email
         'password': 'pass123'
     })
+    assert login_response.status_code == 200
     token = json.loads(login_response.data)['token']
-    
-   
+
+    # Add to cart
     cart_response = client.post('/cart/add',
         json={
-            'product_id': test_product['id'],  
+            'product_id': test_product['id'],
             'quantity': 1
         },
         headers={'Authorization': f'Bearer {token}'}
     )
     assert cart_response.status_code == 201
+    data = json.loads(cart_response.data)
+    assert 'cart_item' in data
 
 def test_get_cart(client, app, test_product):
  

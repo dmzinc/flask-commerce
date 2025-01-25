@@ -6,24 +6,30 @@ from product.physical import PhysicalProduct
 from product.digital import DigitalProduct
 from utils.logger import logger, cart_logger
 
-class Cart(Order):
+class Cart(db.Model):
     __tablename__ = 'cart_items'
-    id = db.Column(db.Integer, db.ForeignKey('orders.id'), primary_key=True)
-    __mapper_args__ = {
-        'polymorphic_identity': 'cart'
-    }
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=False)
+    quantity = db.Column(db.Integer, nullable=False, default=1)
+    total_price = db.Column(db.Float, nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='in_cart')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship('User', backref='cart_items')
+    product = db.relationship('Product', backref='cart_items')
 
     def check_stock(self, product):
         """Check if product is in stock and quantity is available"""
         if isinstance(product, PhysicalProduct):
             if product.stock == 0:
-                return False, 
+                return False, "Product out of stock"
             elif product.stock < self.quantity:
-                return False, f"Only {product.stock} items available in stock"
-            return True,
-        elif isinstance(product, DigitalProduct):
-            return True, 
-        return False,
+                return False, f"Only {product.stock} items available"
+            return True, "Stock available"
+        return True, "Digital product"
 
     def process(self):
         """Process the cart item"""
@@ -39,16 +45,13 @@ class Cart(Order):
         }
 
     def to_dict(self):
-        from product.product import Product
-        product = db.session.get(Product, self.product_id)
         return {
             'id': self.id,
             'product_id': self.product_id,
-            'product_name': product.name if product else None,
             'quantity': self.quantity,
-            'price': product.price if product else None,
             'total_price': self.total_price,
-            'status': self.status
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
     @classmethod
@@ -59,54 +62,59 @@ class Cart(Order):
     @classmethod
     def add_to_cart(cls, product_id, quantity, user_id):
         """Add item to cart"""
-        from product.product import Product
-        product = db.session.get(Product, product_id)
-        if not product:
-            return None, "Product not found"
+        try:
+            product = Product.query.get(product_id)
+            if not product:
+                return None, "Product not found"
 
-        # Check existing cart item
-        cart_item = cls.query.filter_by(
-            product_id=product_id,
-            status='in_cart',
-            user_id=user_id
-        ).first()
-
-        if cart_item:
-            cart_item.quantity += quantity
-            cart_item.total_price = product.price * cart_item.quantity
-        else:
-            cart_item = cls(
+            cart_item = cls.query.filter_by(
                 product_id=product_id,
-                quantity=quantity,
-                total_price=product.price * quantity,
                 user_id=user_id,
                 status='in_cart'
-            )
+            ).first()
 
-        # Check stock availability
-        stock_available, message = cart_item.check_stock(product)
-        if not stock_available:
-            return None, message
+            if cart_item:
+                cart_item.quantity += quantity
+                cart_item.total_price = product.price * cart_item.quantity
+            else:
+                cart_item = cls(
+                    product_id=product_id,
+                    quantity=quantity,
+                    total_price=product.price * quantity,
+                    user_id=user_id,
+                    status='in_cart'
+                )
 
-        try:
+            # Check stock availability
+            stock_available, message = cart_item.check_stock(product)
+            if not stock_available:
+                return None, message
+
             if not cart_item.id:
                 db.session.add(cart_item)
             db.session.commit()
-            return cart_item,
+            
+            return cart_item, "Item added to cart successfully"
+            
         except Exception as e:
             db.session.rollback()
             return None, str(e)
 
     @classmethod
     def clear_cart(cls, user_id):
-        """Clear all items from user's cart"""
+        """Clear user's cart"""
         try:
-            cls.query.filter_by(
+            cart_items = cls.query.filter_by(
                 user_id=user_id,
                 status='in_cart'
-            ).delete()
+            ).all()
+            
+            for item in cart_items:
+                db.session.delete(item)
+            
             db.session.commit()
-            return True, 
+            return True, "Cart cleared successfully"
+            
         except Exception as e:
             db.session.rollback()
             return False, str(e)

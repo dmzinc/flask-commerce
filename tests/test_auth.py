@@ -12,18 +12,21 @@ def test_login_success(client, app):
     })
     
     response = client.post('/login', json={
-        'username': 'testuser',
+        'email': 'test@example.com',
         'password': 'password123'
     })
     
     assert response.status_code == 200
     data = json.loads(response.data)
     assert 'token' in data
+    assert 'user_type' in data
 
 def test_login_invalid_credentials(client):
     response = client.post('/login', json={
-        'username': 'nonexistent',
+        'email': 'nonexistent@example.com',
         'password': 'wrong'
     })
     
-    assert response.status_code == 401 
+    assert response.status_code == 404
+    data = json.loads(response.data)
+    assert 'error' in data 
